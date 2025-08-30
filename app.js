@@ -4,7 +4,6 @@ const {open} = require('sqlite')
 const sqlite3 = require('sqlite3')
 const bcrypt = require('bcrypt')
 const jwt = require('jsonwebtoken')
-const {format} = require('date-fns')
 
 const app = express()
 app.use(express.json())
@@ -38,10 +37,12 @@ const authHeaderToken = async (request, response, next) => {
   if (jwtToken === undefined) {
     response.status(401).send('Invalid JWT Token')
   } else {
-    jwt.verify(jwtToken, 'My_Secret_code', async (error, payload) => {
+    jwt.verify(jwtToken, 'mySecretCode', async (error, payload) => {
       if (error) {
         response.status(401).send('Invalid JWT Token')
       } else {
+        request.username = payload.username
+        request.userId = payload.userId
         next()
       }
     })
@@ -59,7 +60,9 @@ app.post('/register/', async (request, response) => {
 
   const dbUser = await database.get(selectUserQuery)
 
-  if (dbUser === undefined) {
+  if (password.length < 6) {
+    response.status(400).send('Password is too short')
+  } else if (dbUser === undefined) {
     const createUserQuery = `INSERT INTO 
                 user(username,password,name,gender)
         VALUES ('${username}','${hashedPassword}','${name}','${gender}')`
@@ -67,8 +70,6 @@ app.post('/register/', async (request, response) => {
     const dbResponse = await database.run(createUserQuery)
     const newUserId = dbResponse.lastID
     response.status(200).send('User created successfully')
-  } else if (password.length < 6) {
-    response.status(400).send('Password is too short')
   } else {
     response.status(400).send('User already exists')
   }
@@ -84,8 +85,8 @@ app.post('/login/', async (request, response) => {
   } else {
     const isValidPassword = await bcrypt.compare(password, dbUser.password)
     if (isValidPassword) {
-      const payload = {username: username}
-      const jwtToken = jwt.sign(payload, 'My_Secret_code')
+      const payload = {username: username, userId: dbUser.user_id}
+      const jwtToken = jwt.sign(payload, 'mySecretCode')
       response.send({jwtToken})
     } else {
       response.status(400).send('Invalid password')
@@ -94,30 +95,32 @@ app.post('/login/', async (request, response) => {
 })
 //API 3
 app.get('/user/tweets/feed/', authHeaderToken, async (request, response) => {
+  const {userId} = request
   const getUserTweetsQuery = `
               SELECT 
                 DISTINCT username,
                 tweet,
                 date_time AS dateTime
-              FROM 
-                  user
-                    INNER JOIN 
-                      tweet ON user.user_id = tweet.user_id
-                      INNER JOIN follower ON follower.following_user_id = tweet.user_id
-              ORDER BY dateTime DESC
-              LIMIT 4`
+              
+              FROM follower
+                  INNER JOIN tweet ON follower.following_user_id=tweet.user_id
+                  INNER JOIN user ON tweet.user_id=user.user_id
+                  WHERE follower.follower_user_id=${userId}
+                  ORDER BY dateTime DESC LIMIT 4`
   const tweetData = await database.all(getUserTweetsQuery)
   response.send(tweetData)
 })
 //API 4
 app.get('/user/following/', authHeaderToken, async (request, response) => {
+  const {userId} = request
   const getUserFollowingQuery = `
                 SELECT 
                     DISTINCT(name) 
                 FROM 
                     user 
                       INNER JOIN 
-                        follower ON user.user_id = follower.following_user_id                  
+                        follower ON user.user_id = follower.following_user_id
+                      WHERE follower.follower_user_id=${userId}                  
                         `
   const followingData = await database.all(getUserFollowingQuery)
   response.send(followingData)
@@ -125,13 +128,15 @@ app.get('/user/following/', authHeaderToken, async (request, response) => {
 
 //API 5
 app.get('/user/followers/', authHeaderToken, async (request, response) => {
+  const {userId} = request
   const getUserFollowersQuery = `
                 SELECT 
-                    DISTINCT(name) 
+                    user.name
                 FROM 
-                    user
+                    follower
                       INNER JOIN 
-                        follower ON user.user_id = follower.follower_user_id
+                        user ON follower.follower_user_id = user.user_id
+                      WHERE follower.following_user_id=${userId}
                         `
   const followersData = await database.all(getUserFollowersQuery)
   response.send(followersData)
@@ -154,6 +159,7 @@ const hasAccessToTweet = async tweetId => {
 }
 
 // API 6
+
 app.get('/tweets/:tweetId/', authHeaderToken, async (request, response) => {
   const {tweetId} = request.params
 
@@ -177,7 +183,9 @@ app.get('/tweets/:tweetId/', authHeaderToken, async (request, response) => {
     response.send(tweetsData)
   }
 })
+
 //API 7
+
 app.get(
   '/tweets/:tweetId/likes/',
   authHeaderToken,
@@ -203,6 +211,7 @@ app.get(
 )
 
 //API 8
+
 app.get(
   '/tweets/:tweetId/replies/',
   authHeaderToken,
@@ -227,8 +236,11 @@ app.get(
     }
   },
 )
+
 //API 9
+
 app.get('/user/tweets/', authHeaderToken, async (request, response) => {
+  const {userId} = request
   const getTweetsQuery = `
             SELECT
                  tweet.tweet,
@@ -238,6 +250,7 @@ app.get('/user/tweets/', authHeaderToken, async (request, response) => {
             FROM
                 tweet LEFT JOIN like ON tweet.tweet_id = like.tweet_id
                 LEFT JOIN reply ON reply.tweet_id = tweet.tweet_id
+            WHERE tweet.user_id = ${userId}
             GROUP BY
                   tweet.tweet_id
             
@@ -245,18 +258,27 @@ app.get('/user/tweets/', authHeaderToken, async (request, response) => {
   const tweetsData = await database.all(getTweetsQuery)
   response.send(tweetsData)
 })
+
 //API 10
+
 app.post('/user/tweets/', authHeaderToken, async (request, response) => {
   const {tweet} = request.body
-  //const dateTime = format(new Date(), 'yyyy-MM-dd HH:mm:ss')
-  const createTweetQuery = `INSERT INTO tweet(tweet) VALUES('${tweet}')`
+  const {username} = request
+
+  const getUserIdQuery = `SELECT user_id FROM user WHERE username='${username}'`
+  const {user_id} = await database.get(getUserIdQuery)
+
+  const createTweetQuery = `INSERT INTO tweet(tweet,user_id) VALUES('${tweet}',${user_id})`
   await database.run(createTweetQuery)
   response.send('Created a Tweet')
 })
+
 //API 11
+
 app.delete('/tweets/:tweetId/', authHeaderToken, async (request, response) => {
   const {tweetId} = request.params
-  const accessQuery = `SELECT * FROM tweet WHERE tweet_id = ${tweetId}`
+  const {userId} = request
+  const accessQuery = `SELECT * FROM tweet WHERE tweet_id = ${tweetId} AND user_id = ${userId}`
   const tweet = await database.get(accessQuery)
 
   if (tweet === undefined) {
@@ -267,4 +289,5 @@ app.delete('/tweets/:tweetId/', authHeaderToken, async (request, response) => {
     response.send('Tweet Removed')
   }
 })
+
 module.exports = app
